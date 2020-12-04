@@ -155,6 +155,7 @@ if __name__ == '__main__':
                         choices=models.POLICY_NETS.keys())
     parser.add_argument('--value-net-type', type=str,
                         choices=models.VALUE_NETS.keys())
+    parser.add_argument('--use_transformer', type=bool, default=True)
     parser.add_argument('--train-steps', type=int,
                         help='num agent training steps')
     parser.add_argument('--cpu', type=bool, const=True, nargs='?')

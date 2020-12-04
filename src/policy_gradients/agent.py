@@ -29,7 +29,7 @@ class Trainer():
     library
     '''
     def __init__(self, policy_net_class, value_net_class, params,
-                 store, advanced_logging=True, log_every=5):
+                 store, advanced_logging=True, log_every=5, use_transformer=True):
         '''
         Initializes a new Trainer class.
         Inputs;
@@ -69,36 +69,105 @@ class Trainer():
         self.n_steps = 0
         self.log_every = log_every
 
+        # self.use_transformer = use_transformer
+        self.use_transformer = False
+
         # Instantiation
-        self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
-                                             self.INITIALIZATION,
-                                             time_in_state=time_in_state)
+        if self.use_transformer:
+            self.SHARE_WEIGHTS = True
 
-        opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
-        assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
-        # Whether we should use Adam or simple GD to optimize the policy parameters
-        if self.PPO_LR_ADAM != -1:
-            kwargs = {
-                'lr':self.PPO_LR_ADAM,
-            }
+            # TODO: default params for now, put this in config file
+            CORE_SIZE = self.NUM_FEATURES[0] # what was it ?
+            self.model_size = 128
 
-            if self.params.ADAM_EPS > 0:
-                kwargs['eps'] = self.ADAM_EPS
+            self.core_embedding = nn.Linear(CORE_SIZE, self.model_size)
+            self.factor_embedding = nn.Linear(self.NUM_FEATURES[1], self.model_size)
 
-            self.params.POLICY_ADAM = optim.Adam(self.policy_model.parameters(),
-                                                 **kwargs)
+
+            # TODO change this by putting every network in the same module
+            self.core_embedding_opt = optim.Adam(
+                self.core_embedding.parameters(),
+                lr=self.PPO_LR_ADAM,
+                eps=self.ADAM_EPS
+            )
+            self.factor_embedding_opt = optim.Adam(
+                self.factor_embedding.parameters(),
+                lr=self.PPO_LR_ADAM,
+                eps=self.ADAM_EPS
+            )
+
+            transformer_model = Transformer(
+                n_heads=2,
+                d_model=self.model_size,
+                num_layers=2,
+                dim_feedforward=128
+            )
+            policy_head = policy_net_class(128, self.NUM_ACTIONS, self.INITIALIZATION,
+                                                 time_in_state=time_in_state)
+            self.policy_model = nn.Sequential(transformer_model, policy_head)
+
+            self.policy_model = TransformerDiscPolicy(
+                state_dim=self.model_size,
+                action_dim=self.NUM_ACTIONS,
+                init=self.INITIALIZATION,
+                n_heads=2,
+                d_model=self.model_size,
+                num_layers=2,
+                dim_feedforward=128,
+            )
+
+            # self.value_model = value_net_class(128, self.INITIALIZATION)
+
+            # self.policy_opt = optim.Adam(
+            #     self.policy_model.parameters(),
+            #     lr=self.PPO_LR_ADAM,
+            #     eps=self.ADAM_EPS
+            # )
+
+            self.params.POLICY_ADAM = optim.Adam(
+                self.policy_model.parameters(),
+                lr=self.PPO_LR_ADAM,
+                eps=self.ADAM_EPS
+            )
+
+            # we share weights so no specific value model, the value estimations are done by the
+            # policy model
+            self.val_model = value_net_class(self.NUM_FEATURES[0], self.INITIALIZATION)
+            self.val_opt = optim.Adam(
+                self.val_model.parameters(),
+                lr=self.VAL_LR,
+                eps=1e-5
+            )
         else:
-            self.params.POLICY_ADAM = optim.SGD(self.policy_model.parameters(), lr=self.PPO_LR)
+            self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
+                                                 self.INITIALIZATION,
+                                                 time_in_state=time_in_state)
 
-        # If using a time dependent value function, add one extra feature
-        # for the time ratio t/T
-        if time_in_state:
-            self.params.NUM_FEATURES = self.NUM_FEATURES + 1
+            opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
+            assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
+            # Whether we should use Adam or simple GD to optimize the policy parameters
+            if self.PPO_LR_ADAM != -1:
+                kwargs = {
+                    'lr':self.PPO_LR_ADAM,
+                }
 
-        # Value function optimization
-        self.val_model = value_net_class(self.NUM_FEATURES, self.INITIALIZATION)
-        self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5) 
-        assert self.policy_model.discrete == (self.AGENT_TYPE == "discrete")
+                if self.params.ADAM_EPS > 0:
+                    kwargs['eps'] = self.ADAM_EPS
+
+                self.params.POLICY_ADAM = optim.Adam(self.policy_model.parameters(),
+                                                     **kwargs)
+            else:
+                self.params.POLICY_ADAM = optim.SGD(self.policy_model.parameters(), lr=self.PPO_LR)
+
+            # If using a time dependent value function, add one extra feature
+            # for the time ratio t/T
+            if time_in_state:
+                self.params.NUM_FEATURES = self.NUM_FEATURES + 1
+
+            # Value function optimization
+            self.val_model = value_net_class(self.NUM_FEATURES, self.INITIALIZATION)
+            self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5)
+        # assert self.policy_model.discrete == (self.AGENT_TYPE == "discrete")
 
         # Learning rate annealing
         # From OpenAI hyperparametrs:
@@ -183,11 +252,34 @@ class Trainer():
 
         return advantages.clone().detach(), returns.clone().detach()
 
+    def encode_observations(self, obss):
+        # for use with transformer model and babyai custom env
+        assert self.use_transformer
+
+        embedded_obss = []
+        # input is list of list of observations
+        for obs_list in obss:
+            core_embedded = self.core_embedding(torch.FloatTensor(obs_list[0]))
+            core_embedded = core_embedded.unsqueeze(0)
+            if obs_list[1:]:
+                factors_embedded = self.factor_embedding(cpu_tensorize(obs_list[1:]))
+            else:
+                factors_embedded = torch.zeros(0, self.model_size)
+            embedded_obss.append(torch.cat([core_embedded, factors_embedded], 0))
+
+        return embedded_obss
+
     def reset_envs(self, envs):
         '''
         Resets environments and returns initial state with shape:
         (# actors, 1, ... state_shape)
 	    '''
+        # TODO all vectors provided by the env do not have the same size
+        # TODO we pass the observations as they are for now, assuming CPU
+        if self.use_transformer:
+            return [env.reset() for env in envs]
+            # return self.encode_obsservations([env.reset() for env in envs])
+
         if self.CPU:
             return cpu_tensorize([env.reset() for env in envs]).unsqueeze(1)
         else:
@@ -216,12 +308,13 @@ class Trainer():
                 new_state = env.reset()
 
             # Aggregate
-            normed_rewards.append([normed_reward])
-            not_dones.append([int(not is_done)])
-            states.append([new_state])
+            normed_rewards.append(normed_reward)
+            not_dones.append(int(not is_done))
+            states.append(new_state)
 
-        tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
-        data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
+        # tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
+        # data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
+        data = [normed_rewards, states, not_dones]
         return [completed_episode_info, *data]
 
     def run_trajectories(self, num_saps, return_rewards=False, should_tqdm=False):
@@ -248,73 +341,126 @@ class Trainer():
         completed_episode_info = []
         traj_length = int(num_saps // self.NUM_ACTORS)
 
-        shape = (self.NUM_ACTORS, traj_length)
-        all_zeros = [ch.zeros(shape) for i in range(3)]
-        rewards, not_dones, action_log_probs = all_zeros
 
-        actions_shape = shape + (self.NUM_ACTIONS,)
-        actions = ch.zeros(actions_shape)
 
-        states_shape = (self.NUM_ACTORS, traj_length+1) + initial_states.shape[2:]
-        states =  ch.zeros(states_shape)
+        if self.use_transformer:
+            rewards, not_dones, action_log_probs, actions = [], [], [], []
 
-        iterator = range(traj_length) if not should_tqdm else tqdm.trange(traj_length)
+            assert self.NUM_ACTORS == 1
 
-        assert self.NUM_ACTORS == 1
+            # states_shape = (1, traj_length+1, self.model_size)
+            states = []
 
-        states[:, 0, :] = initial_states
-        last_states = states[:, 0, :]
-        for t in iterator:
-            # assert shape_equal([self.NUM_ACTORS, self.NUM_FEATURES], last_states)
-            # Retrieve probabilities 
-            # action_pds: (# actors, # actions), prob dists over actions
-            # next_actions: (# actors, 1), indices of actions
-            # next_action_probs: (# actors, 1), prob of taken actions
-            action_pds = self.policy_model(last_states)
-            next_actions = self.policy_model.sample(action_pds)
-            next_action_log_probs = self.policy_model.get_loglikelihood(action_pds, next_actions)
+            states.append(initial_states[0])
 
-            next_action_log_probs = next_action_log_probs.unsqueeze(1)
-            # shape_equal([self.NUM_ACTORS, 1], next_action_log_probs)
+            iterator = range(traj_length) if not should_tqdm else tqdm.trange(traj_length)
+            last_states = states
+            for t in iterator:
+                last_states = self.encode_observations(last_states)
+                last_states = last_states[0].unsqueeze(1) # create batch dim for transformer
+                action_pds = self.policy_model(last_states)
+                next_actions = self.policy_model.sample(action_pds)
+                next_action_log_probs = self.policy_model.get_loglikelihood(action_pds, next_actions)
 
-            # if discrete, next_actions is (# actors, 1) 
-            # otw if continuous (# actors, 1, action dim)
-            next_actions = next_actions.unsqueeze(1)
-            # if self.policy_model.discrete:
-            #     assert shape_equal([self.NUM_ACTORS, 1], next_actions)
-            # else:
-            #     assert shape_equal([self.NUM_ACTORS, 1, self.policy_model.action_dim])
+                next_action_log_probs = next_action_log_probs.unsqueeze(1)
+                next_actions = next_actions.unsqueeze(1)
 
-            ret = self.multi_actor_step(next_actions, envs)
+                ret = self.multi_actor_step(next_actions, envs)
+                done_info, next_rewards, next_states, next_not_dones = ret
 
-            # done_info = List of (length, reward) pairs for each completed trajectory
-            # (next_rewards, next_states, next_dones) act like multi-actor env.step()
-            done_info, next_rewards, next_states, next_not_dones = ret
-            # assert shape_equal([self.NUM_ACTORS, 1], next_rewards, next_not_dones)
-            # assert shape_equal([self.NUM_ACTORS, 1, self.NUM_FEATURES], next_states)
+                if len(done_info) > 0 and (t != self.T - 1 or len(completed_episode_info) == 0):
+                    completed_episode_info.extend(done_info)
 
-            # If some of the actors finished AND this is not the last step
-            # OR some of the actors finished AND we have no episode information
-            if len(done_info) > 0 and (t != self.T - 1 or len(completed_episode_info) == 0):
-                completed_episode_info.extend(done_info)
+                pairs = [
+                    (rewards, next_rewards),
+                    (not_dones, next_not_dones),
+                    (actions, next_actions),
+                    (action_log_probs, next_action_log_probs),
+                    (states, next_states)
+                ]
 
-            # Update histories
-            # each shape: (nact, t, ...) -> (nact, t + 1, ...)
+                last_states = next_states
+                for total, v in pairs:
+                    if total is states:
+                        total.append(v[0])
+                    else:
+                        total.append(v)
+                    # else:
+                    #     total[:, t] = v
+        else:
 
-            pairs = [
-                (rewards, next_rewards),
-                (not_dones, next_not_dones),
-                (actions, next_actions),
-                (action_log_probs, next_action_log_probs),
-                (states, next_states)
-            ]
+            shape = (self.NUM_ACTORS, traj_length)
+            all_zeros = [ch.zeros(shape) for i in range(3)]
+            rewards, not_dones, action_log_probs = all_zeros
+            actions_shape = shape + (self.NUM_ACTIONS,)
+            actions = ch.zeros(actions_shape)
+            states_shape = (self.NUM_ACTORS, traj_length+1) + initial_states.shape[2:]
+            states =  ch.zeros(states_shape)
 
-            last_states = next_states[:, 0, :]
-            for total, v in pairs:
-                if total is states:
-                    total[:, t+1] = v
-                else:
-                    total[:, t] = v
+            iterator = range(traj_length) if not should_tqdm else tqdm.trange(traj_length)
+
+            assert self.NUM_ACTORS == 1
+
+            states[:, 0, :] = initial_states
+            last_states = states[:, 0, :]
+            for t in iterator:
+                # assert shape_equal([self.NUM_ACTORS, self.NUM_FEATURES], last_states)
+                # Retrieve probabilities
+                # action_pds: (# actors, # actions), prob dists over actions
+                # next_actions: (# actors, 1), indices of actions
+                # next_action_probs: (# actors, 1), prob of taken actions
+                action_pds = self.policy_model(last_states)
+                next_actions = self.policy_model.sample(action_pds)
+                next_action_log_probs = self.policy_model.get_loglikelihood(action_pds, next_actions)
+
+                next_action_log_probs = next_action_log_probs.unsqueeze(1)
+                # shape_equal([self.NUM_ACTORS, 1], next_action_log_probs)
+
+                # if discrete, next_actions is (# actors, 1)
+                # otw if continuous (# actors, 1, action dim)
+                next_actions = next_actions.unsqueeze(1)
+                # if self.policy_model.discrete:
+                #     assert shape_equal([self.NUM_ACTORS, 1], next_actions)
+                # else:
+                #     assert shape_equal([self.NUM_ACTORS, 1, self.policy_model.action_dim])
+
+                ret = self.multi_actor_step(next_actions, envs)
+
+                # done_info = List of (length, reward) pairs for each completed trajectory
+                # (next_rewards, next_states, next_dones) act like multi-actor env.step()
+                done_info, next_rewards, next_states, next_not_dones = ret
+                # assert shape_equal([self.NUM_ACTORS, 1], next_rewards, next_not_dones)
+                # assert shape_equal([self.NUM_ACTORS, 1, self.NUM_FEATURES], next_states)
+
+                # If some of the actors finished AND this is not the last step
+                # OR some of the actors finished AND we have no episode information
+                if len(done_info) > 0 and (t != self.T - 1 or len(completed_episode_info) == 0):
+                    completed_episode_info.extend(done_info)
+
+                # Update histories
+                # each shape: (nact, t, ...) -> (nact, t + 1, ...)
+
+                pairs = [
+                    (rewards, next_rewards),
+                    (not_dones, next_not_dones),
+                    (actions, next_actions),
+                    (action_log_probs, next_action_log_probs),
+                    (states, next_states)
+                ]
+
+                last_states = next_states[:, 0, :]
+                for total, v in pairs:
+                    if total is states:
+                        total[:, t+1] = v
+                    else:
+                        total[:, t] = v
+
+        # if transformer, tensorize everything except the states
+        if self.use_transformer:
+            action_log_probs = torch.FloatTensor(action_log_probs)
+            rewards = torch.FloatTensor(rewards)
+            not_dones = torch.LongTensor(not_dones)
+            actions = torch.LongTensor(actions)
 
         # Calculate the average episode length and true rewards over all the trajectories
         infos = np.array(list(zip(*completed_episode_info)))
@@ -327,7 +473,11 @@ class Trainer():
             avg_episode_reward = -1
 
         # Last state is never acted on, discard
-        states = states[:,:-1,:]
+        if self.use_transformer:
+            states.pop(-1)
+        else:
+            states = states[:,:-1,:]
+
         trajs = Trajectories(rewards=rewards, 
             action_log_probs=action_log_probs, not_dones=not_dones, 
             actions=actions, states=states)
@@ -358,7 +508,21 @@ class Trainer():
             if not self.SHARE_WEIGHTS:
                 values = self.val_model(trajs.states).squeeze(-1)
             else:
-                values = self.policy_model.get_value(trajs.states).squeeze(-1)
+                if self.use_transformer:
+                    states = self.encode_observations(trajs.states)
+                    # values = self.policy_model.get_value(states).squeeze(-1)
+                    values = []
+                    for state in states:
+                        state = state.unsqueeze(1)
+                        values.append(self.policy_model.get_value(state).squeeze(-1))
+                    # values = torch.cat([self.policy_model.get_value(state).squeeze(-1)
+                    #                      for state in states])
+                    values = torch.cat(values)
+
+                    # tensorize stuff
+
+                else:
+                    values = self.policy_model.get_value(trajs.states).squeeze(-1)
 
             # Calculate advantages and returns
             advantages, returns = self.advantage_and_return(trajs.rewards,
@@ -413,6 +577,7 @@ class Trainer():
         # Update the value function before unrolling the trajectories
         # Pass the logging data into the function if applicable
         val_loss = ch.tensor(0.0)
+        # we always share weights with transformers
         if not self.SHARE_WEIGHTS:
             val_loss = value_step(saps.states, saps.returns, 
                 saps.advantages, saps.not_dones, self.val_model,
@@ -425,8 +590,9 @@ class Trainer():
 
 
         # Take optimizer steps
+        # policy_model = nn.Sequential(self.transformer_model, self.policy_model)
         args = [saps.states, saps.actions, saps.action_log_probs,
-                saps.rewards, saps.returns, saps.not_dones, 
+                saps.rewards, saps.returns, saps.not_dones,
                 saps.advantages, self.policy_model, self.params, 
                 store_to_pass, self.n_steps]
 
@@ -434,6 +600,9 @@ class Trainer():
 
         # Policy optimization step
         surr_loss = self.policy_step(*args).mean()
+        # TODO include those in policy model
+        self.core_embedding_opt.step()
+        self.factor_embedding_opt.step()
 
         # If the anneal_lr option is set, then we decrease the 
         # learning rate at each training step

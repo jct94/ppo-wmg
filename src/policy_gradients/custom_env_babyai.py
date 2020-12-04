@@ -15,7 +15,8 @@ SUCCESS_RATE_THRESHOLD = 0.99
 HELDOUT_TESTING = True
 NUM_TEST_EPISODES = 1000
 BINARY_REWARD = True
-OBS_ENCODER = "Flat"
+OBS_ENCODER = "Factored"
+# OBS_ENCODER = "Factored"
 USE_INSTRUCTION = True
 
 color_list = ['red', 'green', 'blue', 'purple', 'yellow', 'grey']
@@ -289,6 +290,9 @@ class Env(object):
                  seed=None):
         if not seed:
             seed = 25912
+
+        # TODO remove this, temporary
+        norm_states = False
 
         self.env = gym.make(game)
         self.env.seed(seed)

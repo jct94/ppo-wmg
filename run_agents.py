@@ -2,12 +2,12 @@ from multiprocessing import Process, JoinableQueue
 import sys
 from glob import glob
 from os import path
-from run import main
+from src.run import main
 import json
 
 agent_configs = sys.argv[1]
 q = JoinableQueue()
-NUM_THREADS = 24
+NUM_THREADS = 12
 
 def run_single_config(queue):
     while True:

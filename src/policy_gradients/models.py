@@ -375,6 +375,68 @@ class CtsPolicy(nn.Module):
         return entropies
 
 
+#### Transformer-based policy and value networks ####
+
+class Transformer(nn.Module):
+    """
+    Wrapper around the pytorch Transformer module.
+    """
+    def __init__(self, n_heads, d_model, num_layers, dim_feedforward,
+                 dropout=0., query_token=0):
+        super().__init__()
+
+        # this assumes the core vector in in zeroth position
+        self.query_token = query_token
+
+        tfm_layer = nn.TransformerEncoderLayer(
+            d_model,
+            n_heads,
+            dim_feedforward,
+            dropout
+        )
+        norm = nn.LayerNorm(d_model)
+        self.tfm = nn.TransformerEncoder(tfm_layer, num_layers, norm)
+        # TODO: no custom weight init
+
+    def forward(self, input):
+        # input has size [seq, batch, feature_dim]
+        # we output the transformer value corresponding to the fixed query index
+        return self.tfm(input)[self.query_token]
+
+class TransformerDiscPolicy(DiscPolicy):
+    """
+    Prefixes the Fully-connected DiscPolicy with the Transformer module.
+    """
+    def __init__(self, state_dim, action_dim, init, # DiscPolicy args
+                 n_heads, d_model, num_layers, dim_feedforward, # transformer args
+                 hidden_sizes=HIDDEN_SIZES, share_weights=False, # DiscPolicy kwargs
+                 dropout=0., query_token=0): # transformer kwargs
+
+        super().__init__(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            init=init,
+            hidden_sizes=hidden_sizes,
+            time_in_state=False,
+            share_weights=True
+        )
+
+        self.transformer = Transformer(
+            n_heads=n_heads,
+            d_model=d_model,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            query_token=query_token
+        )
+
+    def forward(self, input):
+        tfm_out = self.transformer(input)
+        return super().forward(tfm_out)
+
+    def get_value(self, input):
+        tfm_out = self.transformer(input)
+        return super().get_value(tfm_out)
 
 ## Retrieving networks
 # Make sure to add newly created networks to these dictionaries!
