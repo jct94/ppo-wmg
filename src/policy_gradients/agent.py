@@ -69,8 +69,8 @@ class Trainer():
         self.n_steps = 0
         self.log_every = log_every
 
-        # self.use_transformer = use_transformer
-        self.use_transformer = False
+        self.use_transformer = use_transformer
+        # self.use_transformer = False
 
         # Instantiation
         if self.use_transformer:

@@ -11,7 +11,7 @@
     "ppo_lr": -1,
     "ppo_lr_adam": 1e-4,
     "val_lr":1.5e-4,
-    "t": 2048,
+    "t": 128,
     "entropy_coeff": 0.0,
     "clip_eps": 0.2,
     "clip_val_eps": 0.2,

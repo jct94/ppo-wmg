@@ -16,7 +16,7 @@ HELDOUT_TESTING = True
 NUM_TEST_EPISODES = 1000
 BINARY_REWARD = True
 OBS_ENCODER = "Factored"
-# OBS_ENCODER = "Factored"
+# OBS_ENCODER = "Flat"
 USE_INSTRUCTION = True
 
 color_list = ['red', 'green', 'blue', 'purple', 'yellow', 'grey']
