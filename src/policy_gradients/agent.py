@@ -344,9 +344,14 @@ class Trainer():
 
 
         if self.use_transformer:
-            rewards, not_dones, action_log_probs, actions = [], [], [], []
-
             assert self.NUM_ACTORS == 1
+
+            shape = (self.NUM_ACTORS, traj_length)
+            all_zeros = [ch.zeros(shape) for i in range(3)]
+            rewards, not_dones, action_log_probs = all_zeros
+            actions_shape = shape + (self.NUM_ACTIONS,)
+            actions = ch.zeros(actions_shape)
+            # rewards, not_dones, action_log_probs, actions = [], [], [], []
 
             # states_shape = (1, traj_length+1, self.model_size)
             states = []
@@ -365,6 +370,7 @@ class Trainer():
                 next_action_log_probs = next_action_log_probs.unsqueeze(1)
                 next_actions = next_actions.unsqueeze(1)
 
+                # TODO simplify this: use a single environment per Trainer
                 ret = self.multi_actor_step(next_actions, envs)
                 done_info, next_rewards, next_states, next_not_dones = ret
 
@@ -384,9 +390,9 @@ class Trainer():
                     if total is states:
                         total.append(v[0])
                     else:
-                        total.append(v)
+                        # total.append(v)
+                        total[:, t] = v
                     # else:
-                    #     total[:, t] = v
         else:
 
             shape = (self.NUM_ACTORS, traj_length)
