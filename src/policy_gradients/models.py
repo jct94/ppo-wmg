@@ -19,7 +19,7 @@ Contains:
 ########################
 
 HIDDEN_SIZES = (64, 64)
-ACTIVATION = nn.Tanh
+ACTIVATION = nn.ReLU
 STD = 2**0.5
 
 def initialize_weights(mod, initialization_type, scale=STD):

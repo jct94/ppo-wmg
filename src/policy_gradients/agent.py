@@ -341,8 +341,6 @@ class Trainer():
         completed_episode_info = []
         traj_length = int(num_saps // self.NUM_ACTORS)
 
-
-
         if self.use_transformer:
             assert self.NUM_ACTORS == 1
 
@@ -627,6 +625,8 @@ class Trainer():
         # TODO include those in policy model
         self.core_embedding_opt.step()
         self.factor_embedding_opt.step()
+        self.core_embedding_opt.zero_grad()
+        self.factor_embedding_opt.zero_grad()
 
         # If the anneal_lr option is set, then we decrease the 
         # learning rate at each training step

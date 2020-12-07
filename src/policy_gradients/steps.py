@@ -138,7 +138,8 @@ def value_loss_returns(vs, returns, advantages, not_dones, params, old_vs,
 ###
 def value_step(all_states, returns, advantages, not_dones, net,
                val_opt, params, store, old_vs=None, opt_step=None,
-               should_tqdm=False, should_cuda=False, test_saps=None):
+               should_tqdm=False, should_cuda=False, test_saps=None,
+               obs_encoder=None):
     '''
     Take an optimizer step fitting the value function
     parameterized by a neural network
@@ -190,7 +191,8 @@ def value_step(all_states, returns, advantages, not_dones, net,
 
         # Minibatch SGD
         for selected in splits:
-            val_opt.zero_grad()
+            if val_opt is not None:
+                val_opt.zero_grad()
 
             def sel(*args):
                 return [v[selected] for v in args]
@@ -198,10 +200,17 @@ def value_step(all_states, returns, advantages, not_dones, net,
             def to_cuda(*args):
                 return [v.cuda() for v in args]
 
-            tup = sel(returns, advantages, not_dones, old_vs, all_states)
+            tup = sel(returns, advantages, not_dones, old_vs)
+            # get states, since the list is not directly subscriptable
+            sel_states = [all_states[i] for i in selected]
+            sel_encoded_states = obs_encoder(sel_states)
+
             if should_cuda: tup = to_cuda(*tup)
-            sel_rets, sel_advs, sel_not_dones, sel_ovs, sel_states = tup
-            vs = net(sel_states).squeeze(-1)
+            sel_rets, sel_advs, sel_not_dones, sel_ovs = tup
+
+            # vs = net(sel_encoded_states).squeeze(-1) # older version
+            vs = ch.cat([net(state.unsqueeze(1)).squeeze(0) for state in sel_encoded_states])
+
             assert shape_equal_cmp(vs, selected)
 
             vf = VALUE_FUNCS[params.VALUE_CALC]
@@ -304,7 +313,8 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
                 # TODO: adapt the value step
                 val_loss = value_step(batch_states, batch_returns, batch_advs,
                                       batch_not_dones, net.get_value, None, params,
-                                      store, old_vs=batch_old_vs, opt_step=opt_step)
+                                      store, old_vs=batch_old_vs, opt_step=opt_step,
+                                      obs_encoder=obs_encoder)
                 loss += params.VALUE_MULTIPLIER * val_loss
 
             # Optimizer step (Adam or SGD)
