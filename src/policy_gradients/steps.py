@@ -227,7 +227,7 @@ def value_step(all_states, returns, advantages, not_dones, net,
     return val_loss
 
 def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones, 
-                advs, net, params, store, opt_step):
+                advs, net, params, store, opt_step, obs_encoder):
     '''
     Proximal Policy Optimization
     Runs K epochs of PPO as in https://arxiv.org/abs/1707.06347
@@ -246,22 +246,38 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
         orig_dists = net(all_states)
 
     ### ACTUAL PPO OPTIMIZATION START
+    all_encoded_states = obs_encoder(all_states)
     if params.SHARE_WEIGHTS:
-        orig_vs = net.get_value(all_states).squeeze(-1).view([params.NUM_ACTORS, -1])
-        old_vs = orig_vs.detach()
+        orig_vs = []
+        old_vs = []
+        for state in all_encoded_states:
+            # TODO get your dimensions straight, it's fking ugly
+            v = net.get_value(state.unsqueeze(1)).squeeze(-1).unsqueeze(0)
+            orig_vs.append(v)
+            old_vs.append(v.detach())
+        # orig_vs = net.get_value(all_states).squeeze(-1).view([params.NUM_ACTORS, -1])
+        # old_vs = orig_vs.detach()
+        orig_vs = ch.cat(orig_vs)
+        old_vs = ch.cat(old_vs)
 
     for _ in range(params.PPO_EPOCHS):
-        state_indices = np.arange(all_states.shape[0])
+        state_indices = np.arange(len(all_states))
         np.random.shuffle(state_indices)
         splits = np.array_split(state_indices, params.NUM_MINIBATCHES)
         for selected in splits:
             def sel(*args):
                 return [v[selected] for v in args]
 
-            tup = sel(all_states, actions, old_log_ps, advs)
-            batch_states, batch_actions, batch_old_log_ps, batch_advs = tup
+            tup = sel(actions, old_log_ps, advs)
+            batch_actions, batch_old_log_ps, batch_advs = tup
 
-            dist = net(batch_states)
+            # compute policy distribs
+            # TODO: we recompute the encodings, but is this necessary to get the right gradients ?
+            batch_states = [all_states[i] for i in selected]
+            batch_encoded_states = obs_encoder(batch_states)
+            dist = ch.cat([net(state.unsqueeze(1)).squeeze() for state in batch_encoded_states])
+
+            # dist = net(batch_states)
             new_log_ps = net.get_loglikelihood(dist, batch_actions)
 
             shape_equal_cmp(new_log_ps, batch_old_log_ps)
@@ -272,7 +288,7 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
                                        clip_eps=params.CLIP_EPS)
 
             # Calculate entropy bonus
-            entropy_bonus = net.entropies(dist).mean()
+            entropy_bonus = net.entropies(dist.unsqueeze(0)).mean()
 
             # Total loss
             surrogate = -ch.min(unclp_rew, clp_rew).mean()
@@ -284,6 +300,8 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
             if params.SHARE_WEIGHTS:
                 tup = sel(returns, not_dones, old_vs)
                 batch_returns, batch_not_dones, batch_old_vs = tup
+
+                # TODO: adapt the value step
                 val_loss = value_step(batch_states, batch_returns, batch_advs,
                                       batch_not_dones, net.get_value, None, params,
                                       store, old_vs=batch_old_vs, opt_step=opt_step)

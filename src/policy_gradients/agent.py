@@ -314,7 +314,7 @@ class Trainer():
 
         # tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
         # data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
-        data = [normed_rewards, states, not_dones]
+        data = [torch.tensor(normed_rewards), states, torch.tensor(not_dones)]
         return [completed_episode_info, *data]
 
     def run_trajectories(self, num_saps, return_rewards=False, should_tqdm=False):
@@ -462,11 +462,11 @@ class Trainer():
                         total[:, t] = v
 
         # if transformer, tensorize everything except the states
-        if self.use_transformer:
-            action_log_probs = torch.FloatTensor(action_log_probs)
-            rewards = torch.FloatTensor(rewards)
-            not_dones = torch.LongTensor(not_dones)
-            actions = torch.LongTensor(actions)
+        # if self.use_transformer:
+            # action_log_probs = torch.FloatTensor(action_log_probs)
+            # rewards = torch.FloatTensor(rewards)
+            # not_dones = torch.LongTensor(not_dones)
+            # actions = torch.LongTensor(actions)
 
         # Calculate the average episode length and true rewards over all the trajectories
         infos = np.array(list(zip(*completed_episode_info)))
@@ -524,8 +524,9 @@ class Trainer():
                     # values = torch.cat([self.policy_model.get_value(state).squeeze(-1)
                     #                      for state in states])
                     values = torch.cat(values)
-
-                    # tensorize stuff
+                    # TODO we add a batch dimension, it's supposed to correspond to the number of
+                    # parallel envs
+                    values = values.unsqueeze(0)
 
                 else:
                     values = self.policy_model.get_value(trajs.states).squeeze(-1)
@@ -550,7 +551,24 @@ class Trainer():
                 })
 
             # Unroll the trajectories (actors, T, ...) -> (actors*T, ...)
-            saps = trajs.unroll()
+            if self.use_transformer:
+                # in this case, since we have a single actor, unrolling simply means
+                # squeezing the first dim
+                # TODO: since we have only one actor, we can simplyfy the above code and omit
+                # TODO: this manip
+                trajs.rewards = trajs.rewards.squeeze(0)
+                trajs.returns = trajs.returns.squeeze(0)
+                trajs.values = trajs.values.squeeze(0)
+                trajs.not_dones = trajs.not_dones.squeeze(0)
+                trajs.actions = trajs.actions.squeeze(0)
+                trajs.action_log_probs = trajs.action_log_probs.squeeze(0)
+                trajs.advantages = trajs.advantages.squeeze(0)
+                trajs.unrolled = True
+                # trajs.states = states[0] check this
+
+                saps = trajs
+            else:
+                saps = trajs.unroll()
 
         to_ret = (saps, avg_ep_reward, avg_ep_length)
         if return_rewards:
@@ -600,7 +618,7 @@ class Trainer():
         args = [saps.states, saps.actions, saps.action_log_probs,
                 saps.rewards, saps.returns, saps.not_dones,
                 saps.advantages, self.policy_model, self.params, 
-                store_to_pass, self.n_steps]
+                store_to_pass, self.n_steps, self.encode_observations]
 
         self.MAX_KL += self.MAX_KL_INCREMENT 
 
