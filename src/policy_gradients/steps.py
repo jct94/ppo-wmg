@@ -252,7 +252,7 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
         old_vs = []
         for state in all_encoded_states:
             # TODO get your dimensions straight, it's fking ugly
-            v = net.get_value(state.unsqueeze(1)).squeeze(-1).unsqueeze(0)
+            v = net.get_value(state.unsqueeze(1)).squeeze(-1)
             orig_vs.append(v)
             old_vs.append(v.detach())
         # orig_vs = net.get_value(all_states).squeeze(-1).view([params.NUM_ACTORS, -1])
