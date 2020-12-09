@@ -30,7 +30,7 @@
     "clip_observations": 10.0,
     "train_steps": 488,
     "initialization": "orthogonal",
-    "share_weights": false,
+    "share_weights": true,
     "value_multiplier": 0.1,
     "value_clipping": true,
     "cpu": true,

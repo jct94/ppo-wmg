@@ -163,66 +163,69 @@ def value_step(all_states, returns, advantages, not_dones, net,
         "gae": value_loss_gae,
         "time": value_loss_returns
     }
+
+    vf = VALUE_FUNCS[params.VALUE_CALC]
          
-    # If we are not sharing weights, then we need to keep track of what the 
+    if params.SHARE_WEIGHTS:
+        vs = net(all_states).squeeze()
+        val_loss = vf(vs, returns, advantages, not_dones, params, old_vs, store)
+
+    else:
+    # If we are not sharing weights, then we need to keep track of what the
     # last value was here. If we are sharing weights, this is handled in policy_step
-    with ch.no_grad():
-        if old_vs is None:
+        with ch.no_grad():
+            if old_vs is None:
+                state_indices = np.arange(returns.nelement())
+                splits = np.array_split(state_indices, params.NUM_MINIBATCHES)
+                orig_vs = []
+                for selected in splits:
+                    orig_vs.append(net(all_states[selected]).squeeze(-1))
+                orig_vs = ch.cat(orig_vs)
+                old_vs = orig_vs.detach()
+            if test_saps is not None:
+                old_test_vs = net(test_saps.states).squeeze(-1)
+
+        r = range(params.VAL_EPOCHS) if not should_tqdm else \
+                                tqdm(range(params.VAL_EPOCHS))
+        for i in r:
+            # Create minibatches
             state_indices = np.arange(returns.nelement())
+            np.random.shuffle(state_indices)
             splits = np.array_split(state_indices, params.NUM_MINIBATCHES)
-            orig_vs = []
+
+            assert shape_equal_cmp(returns, advantages, not_dones, old_vs)
+
+            # Minibatch SGD
             for selected in splits:
-                orig_vs.append(net(all_states[selected]).squeeze(-1))
-            orig_vs = ch.cat(orig_vs)
-            old_vs = orig_vs.detach()
-        if test_saps is not None:
-            old_test_vs = net(test_saps.states).squeeze(-1)
+                val_opt.zero_grad()
 
-    r = range(params.VAL_EPOCHS) if not should_tqdm else \
-                            tqdm(range(params.VAL_EPOCHS))
-    for i in r:
-        # Create minibatches
-        state_indices = np.arange(returns.nelement())
-        np.random.shuffle(state_indices)
-        splits = np.array_split(state_indices, params.NUM_MINIBATCHES)
+                def sel(*args):
+                    return [v[selected] for v in args]
 
-        assert shape_equal_cmp(returns, advantages, not_dones, old_vs)
+                def to_cuda(*args):
+                    return [v.cuda() for v in args]
 
-        # Minibatch SGD
-        for selected in splits:
-            val_opt.zero_grad()
+                tup = sel(returns, advantages, not_dones, old_vs, all_states)
+                if should_cuda: tup = to_cuda(*tup)
+                sel_rets, sel_advs, sel_not_dones, sel_ovs, sel_states = tup
+                vs = net(sel_states).squeeze(-1)
+                assert shape_equal_cmp(vs, selected)
 
-            def sel(*args):
-                return [v[selected] for v in args]
 
-            def to_cuda(*args):
-                return [v.cuda() for v in args]
+                val_loss = vf(vs, sel_rets, sel_advs, sel_not_dones, params,
+                              sel_ovs, store)
 
-            tup = sel(returns, advantages, not_dones, old_vs, all_states)
-            if should_cuda: tup = to_cuda(*tup)
-            sel_rets, sel_advs, sel_not_dones, sel_ovs, sel_states = tup
-            vs = net(sel_states).squeeze(-1)
-            assert shape_equal_cmp(vs, selected)
+                # From now on, params.SHARE_WEIGHTS must be False
+                val_loss.backward()
+                val_opt.step()
 
-            vf = VALUE_FUNCS[params.VALUE_CALC]
-            val_loss = vf(vs, sel_rets, sel_advs, sel_not_dones, params,
-                          sel_ovs, store)
-
-            # If we are sharing weights, then value_step gets called 
-            # once per policy optimizer step anyways, so we only do one batch
-            if params.SHARE_WEIGHTS:
-                return val_loss
-
-            # From now on, params.SHARE_WEIGHTS must be False
-            val_loss.backward()
-            val_opt.step()
-        if should_tqdm:
-            if test_saps is not None: 
-                vs = net(test_saps.states).squeeze(-1)
-                test_loss = vf(vs, test_saps.returns, test_saps.advantages,
-                    test_saps.not_dones, params, old_test_vs, None)
-            r.set_description(f'vf_train: {val_loss.mean().item():.2f}'
-                              f'vf_test: {test_loss.mean().item():.2f}')
+            if should_tqdm:
+                if test_saps is not None:
+                    vs = net(test_saps.states).squeeze(-1)
+                    test_loss = vf(vs, test_saps.returns, test_saps.advantages,
+                        test_saps.not_dones, params, old_test_vs, None)
+                r.set_description(f'vf_train: {val_loss.mean().item():.2f}'
+                                  f'vf_test: {test_loss.mean().item():.2f}')
 
     return val_loss
 
@@ -282,7 +285,7 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
             # If we are sharing weights, take the value step simultaneously 
             # (since the policy and value networks depend on the same weights)
             if params.SHARE_WEIGHTS:
-                tup = sel(returns, not_dones, old_vs)
+                tup = sel(returns, not_dones, old_vs.squeeze())
                 batch_returns, batch_not_dones, batch_old_vs = tup
                 val_loss = value_step(batch_states, batch_returns, batch_advs,
                                       batch_not_dones, net.get_value, None, params,
@@ -306,8 +309,10 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
                     ch.nn.utils.clip_grad_norm(net.parameters(), params.CLIP_GRAD_NORM)
                 params.POLICY_ADAM.step()
 
-
-    return loss
+    if params.SHARE_WEIGHTS:
+        return loss, loss-val_loss, val_loss
+    else:
+        return loss
 
 def trpo_step(all_states, actions, old_log_ps, rewards, returns, not_dones, advs, net, params, store, opt_step):
     '''

@@ -15,6 +15,7 @@ from .logging import *
 from multiprocessing import Process, Queue
 from .custom_env_babyai import Env
 
+
 class Trainer():
     '''
     This is a class representing a Policy Gradient trainer, which 
@@ -28,6 +29,7 @@ class Trainer():
     Trainer also handles all logging, which is done via the "cox"
     library
     '''
+
     def __init__(self, policy_net_class, value_net_class, params,
                  store, advanced_logging=True, log_every=5):
         '''
@@ -62,7 +64,7 @@ class Trainer():
         self.envs = [env_constructor() for _ in range(self.NUM_ACTORS)]
         self.params.AGENT_TYPE = "discrete" if self.envs[0].is_discrete else "continuous"
         self.params.NUM_ACTIONS = self.envs[0].num_actions
-        self.params.NUM_FEATURES = self.envs[0].num_features 
+        self.params.NUM_FEATURES = self.envs[0].num_features
         self.policy_step = step_with_mode(self.MODE)
         self.params.MAX_KL_INCREMENT = (self.params.MAX_KL_FINAL - self.params.MAX_KL) / self.params.TRAIN_STEPS
         self.advanced_logging = advanced_logging
@@ -72,14 +74,14 @@ class Trainer():
         # Instantiation
         self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
                                              self.INITIALIZATION,
-                                             time_in_state=time_in_state)
+                                             time_in_state=time_in_state, share_weights=self.params.SHARE_WEIGHTS)
 
         opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
         assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
         # Whether we should use Adam or simple GD to optimize the policy parameters
         if self.PPO_LR_ADAM != -1:
             kwargs = {
-                'lr':self.PPO_LR_ADAM,
+                'lr': self.PPO_LR_ADAM,
             }
 
             if self.params.ADAM_EPS > 0:
@@ -97,16 +99,16 @@ class Trainer():
 
         # Value function optimization
         self.val_model = value_net_class(self.NUM_FEATURES, self.INITIALIZATION)
-        self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5) 
+        self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5)
         assert self.policy_model.discrete == (self.AGENT_TYPE == "discrete")
 
         # Learning rate annealing
         # From OpenAI hyperparametrs:
         # Set adam learning rate to 3e-4 * alpha, where alpha decays from 1 to 0 over training
         if self.ANNEAL_LR:
-            lam = lambda f: 1-f/self.TRAIN_STEPS
-            ps = optim.lr_scheduler.LambdaLR(self.POLICY_ADAM, 
-                                                    lr_lambda=lam)
+            lam = lambda f: 1 - f / self.TRAIN_STEPS
+            ps = optim.lr_scheduler.LambdaLR(self.POLICY_ADAM,
+                                             lr_lambda=lam)
             vs = optim.lr_scheduler.LambdaLR(self.val_opt, lr_lambda=lam)
             self.params.POLICY_SCHEDULER = ps
             self.params.VALUE_SCHEDULER = vs
@@ -118,31 +120,30 @@ class Trainer():
         # Logging setup
         self.store = store
         self.store.add_table('optimization', {
-            'mean_reward':float,
-            'final_value_loss':float,
-            'mean_std':float
+            'mean_reward': float,
+            'final_value_loss': float,
+            'mean_std': float
         })
 
         if self.advanced_logging:
             paper_constraint_cols = {
-                'avg_kl':float,
-                'max_ratio':float,
-                'opt_step':int
+                'avg_kl': float,
+                'max_ratio': float,
+                'opt_step': int
             }
 
             value_cols = {
-                'heldout_gae_loss':float,
-                'heldout_returns_loss':float,
-                'train_gae_loss':float,
-                'train_returns_loss':float
+                'heldout_gae_loss': float,
+                'heldout_returns_loss': float,
+                'train_gae_loss': float,
+                'train_returns_loss': float
             }
 
             self.store.add_table('paper_constraints_train',
-                                        paper_constraint_cols)
+                                 paper_constraint_cols)
             self.store.add_table('paper_constraints_heldout',
-                                        paper_constraint_cols)
+                                 paper_constraint_cols)
             self.store.add_table('value_data', value_cols)
-
 
     def __getattr__(self, x):
         '''
@@ -167,8 +168,8 @@ class Trainer():
                    {v_s if s_t not terminal and t == T
         """
         assert shape_equal_cmp(rewards, values, not_dones)
-        
-        V_s_tp1 = ch.cat([values[:,1:], values[:, -1:]], 1) * not_dones
+
+        V_s_tp1 = ch.cat([values[:, 1:], values[:, -1:]], 1) * not_dones
         deltas = rewards + self.GAMMA * V_s_tp1 - values
 
         # now we need to discount each path by gamma * lam
@@ -177,9 +178,9 @@ class Trainer():
         indices = get_path_indices(not_dones)
         for agent, start, end in indices:
             advantages[agent, start:end] = discount_path( \
-                    deltas[agent, start:end], self.LAMBDA*self.GAMMA)
+                deltas[agent, start:end], self.LAMBDA * self.GAMMA)
             returns[agent, start:end] = discount_path( \
-                    rewards[agent, start:end], self.GAMMA)
+                rewards[agent, start:end], self.GAMMA)
 
         return advantages.clone().detach(), returns.clone().detach()
 
@@ -255,8 +256,8 @@ class Trainer():
         actions_shape = shape + (self.NUM_ACTIONS,)
         actions = ch.zeros(actions_shape)
 
-        states_shape = (self.NUM_ACTORS, traj_length+1) + initial_states.shape[2:]
-        states =  ch.zeros(states_shape)
+        states_shape = (self.NUM_ACTORS, traj_length + 1) + initial_states.shape[2:]
+        states = ch.zeros(states_shape)
 
         iterator = range(traj_length) if not should_tqdm else tqdm.trange(traj_length)
 
@@ -312,7 +313,7 @@ class Trainer():
             last_states = next_states[:, 0, :]
             for total, v in pairs:
                 if total is states:
-                    total[:, t+1] = v
+                    total[:, t + 1] = v
                 else:
                     total[:, t] = v
 
@@ -327,10 +328,10 @@ class Trainer():
             avg_episode_reward = -1
 
         # Last state is never acted on, discard
-        states = states[:,:-1,:]
-        trajs = Trajectories(rewards=rewards, 
-            action_log_probs=action_log_probs, not_dones=not_dones, 
-            actions=actions, states=states)
+        states = states[:, :-1, :]
+        trajs = Trajectories(rewards=rewards,
+                             action_log_probs=action_log_probs, not_dones=not_dones,
+                             actions=actions, states=states)
 
         to_ret = (avg_episode_length, avg_episode_reward, trajs)
         if return_rewards:
@@ -362,14 +363,14 @@ class Trainer():
 
             # Calculate advantages and returns
             advantages, returns = self.advantage_and_return(trajs.rewards,
-                                            values, trajs.not_dones)
+                                                            values, trajs.not_dones)
 
             trajs.advantages = advantages
             trajs.returns = returns
             trajs.values = values
 
-            assert shape_equal_cmp(trajs.advantages, 
-                            trajs.returns, trajs.values)
+            assert shape_equal_cmp(trajs.advantages,
+                                   trajs.returns, trajs.values)
 
             # Logging
             if should_log:
@@ -392,11 +393,11 @@ class Trainer():
         # Begin advanged logging code
         assert saps.unrolled
         should_adv_log = self.advanced_logging and \
-                     self.n_steps % self.log_every == 0 and logging
+                         self.n_steps % self.log_every == 0 and logging
 
         self.params.SHOULD_LOG_KL = self.advanced_logging and \
-                        self.KL_APPROXIMATION_ITERS != -1 and \
-                        self.n_steps % self.KL_APPROXIMATION_ITERS == 0
+                                    self.KL_APPROXIMATION_ITERS != -1 and \
+                                    self.n_steps % self.KL_APPROXIMATION_ITERS == 0
         store_to_pass = self.store if should_adv_log else None
         # End logging code
 
@@ -414,26 +415,30 @@ class Trainer():
         # Pass the logging data into the function if applicable
         val_loss = ch.tensor(0.0)
         if not self.SHARE_WEIGHTS:
-            val_loss = value_step(saps.states, saps.returns, 
-                saps.advantages, saps.not_dones, self.val_model,
-                self.val_opt, self.params, store_to_pass).mean()
+            val_loss = value_step(saps.states, saps.returns,
+                                  saps.advantages, saps.not_dones, self.val_model,
+                                  self.val_opt, self.params, store_to_pass).mean()
 
         if logging:
             self.store.log_table_and_tb('optimization', {
                 'final_value_loss': val_loss
             })
 
-
         # Take optimizer steps
         args = [saps.states, saps.actions, saps.action_log_probs,
-                saps.rewards, saps.returns, saps.not_dones, 
-                saps.advantages, self.policy_model, self.params, 
+                saps.rewards, saps.returns, saps.not_dones,
+                saps.advantages, self.policy_model, self.params,
                 store_to_pass, self.n_steps]
 
-        self.MAX_KL += self.MAX_KL_INCREMENT 
+        self.MAX_KL += self.MAX_KL_INCREMENT
 
         # Policy optimization step
-        surr_loss = self.policy_step(*args).mean()
+        if self.SHARE_WEIGHTS:
+            _, surr_loss, val_loss = self.policy_step(*args)
+            surr_loss = surr_loss.mean()
+            val_loss = val_loss.mean()
+        else:
+            surr_loss = self.policy_step(*args).mean()
 
         # If the anneal_lr option is set, then we decrease the 
         # learning rate at each training step
@@ -445,16 +450,15 @@ class Trainer():
             log_value_losses(self, val_saps, 'heldout')
             log_value_losses(self, saps, 'train')
             paper_constraints_logging(self, saps, old_pds,
-                            table='paper_constraints_train')
+                                      table='paper_constraints_train')
             paper_constraints_logging(self, val_saps, val_old_pds,
-                            table='paper_constraints_heldout')
+                                      table='paper_constraints_heldout')
 
             self.store['paper_constraints_train'].flush_row()
             self.store['paper_constraints_heldout'].flush_row()
             self.store['value_data'].flush_row()
 
         return surr_loss, val_loss
-
 
     def train_step(self):
         '''
@@ -474,8 +478,8 @@ class Trainer():
         surr_loss, val_loss = self.take_steps(saps)
 
         # Logging code
-        print("Surrogate Loss:", surr_loss.item(), 
-                        "| Value Loss:", val_loss.item())
+        print("Surrogate Loss:", surr_loss.item(),
+              "| Value Loss:", val_loss.item())
         print("Time elapsed (s):", time.time() - start_time)
         if not self.policy_model.discrete:
             mean_std = ch.exp(self.policy_model.log_stdev).mean()
@@ -485,7 +489,7 @@ class Trainer():
             })
         else:
             self.store['optimization'].update_row({
-                'mean_std':np.nan
+                'mean_std': np.nan
             })
 
         self.store['optimization'].flush_row()
@@ -515,7 +519,7 @@ class Trainer():
         names = {i: get_item(i) for i in items}
 
         param_keys = list(store['metadata'].df.columns)
-        param_values = list(store['metadata'].df.iloc[0,:])
+        param_values = list(store['metadata'].df.iloc[0, :])
 
         def process_item(v):
             try:
@@ -524,9 +528,9 @@ class Trainer():
                 return v
 
         param_values = [process_item(v) for v in param_values]
-        agent_params = {k:v for k, v in zip(param_keys, param_values)}
+        agent_params = {k: v for k, v in zip(param_keys, param_values)}
 
-        if 'adam_eps' not in agent_params: 
+        if 'adam_eps' not in agent_params:
             agent_params['adam_eps'] = 1e-5
         if 'cpu' not in agent_params:
             agent_params['cpu'] = cpu
@@ -573,4 +577,3 @@ class Trainer():
                     advanced_logging=advanced_logging)
 
         return p
-
