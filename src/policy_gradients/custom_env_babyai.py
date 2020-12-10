@@ -15,7 +15,7 @@ SUCCESS_RATE_THRESHOLD = 0.99
 HELDOUT_TESTING = True
 NUM_TEST_EPISODES = 1000
 BINARY_REWARD = True
-OBS_ENCODER = "Flat"
+OBS_ENCODER = "Factored"
 USE_INSTRUCTION = True
 
 color_list = ['red', 'green', 'blue', 'purple', 'yellow', 'grey']
@@ -371,9 +371,12 @@ class Env(object):
             if len(action_shape) == 0 else action_shape[0]
 
         # Number of features
-        #TODO Fix it later to make it work with factored
+        # TODO Fix it later to make it work with factored
         # assert len(self.observation_space) == 1
-        self.num_features = self.observation_space
+        if isinstance(self.observation_space, tuple):
+            self.num_features = self.observation_space[1] # we take the factor dimensiom
+        else:
+            self.num_features = self.observation_space
 
         # Support for state normalization or using time as a feature
         self.state_filter = Identity()
