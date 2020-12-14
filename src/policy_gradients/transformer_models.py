@@ -87,6 +87,8 @@ class SceneTransformer(nn.Module):
 
         self.query_token = 0
         self.max_objects = 9
+        self.core_size = core_size
+        self.factor_size = factor_size
 
         # observation encodings
         self.obs_features = obs_features
@@ -133,7 +135,36 @@ class SceneTransformer(nn.Module):
         obs_tensor = torch.cat(vecs, 0)
         return obs_tensor
 
-    def forward(self, seq_input):
+    def encode_observations_v2(self, obs_list):
+        F = obs_list[0].shape[0] # 63
+
+        n = len(obs_list)
+        m = self.max_objects - n
+        if m < 0:
+            print(f"Dropped {- m} objects !")
+            obs_list = obs_list[:self.max_objects]
+
+        # encode core
+
+        vecs = [tensor(obs_list[0]).unsqueeze(0)]
+        # vecs = [self.core_embedding(tensor(obs_list[0])).unsqueeze(0)]
+
+        # encode factors, if any
+        if obs_list[1:]:
+            for obs in obs_list[1:]:
+                f = obs.shape[0] # f < F
+                v = torch.cat([tensor(obs), torch.zeros(F - f)]).unsqueeze(0)
+                vecs.append(v)
+                # vecs.append(self.factor_embedding(tensor(obs)).unsqueeze(0))
+
+        # pad with zero-vectors if necessary
+        if m > 0:
+            vecs.append(torch.zeros(m, F))
+
+        obs_tensor = torch.cat(vecs, 0)
+        return obs_tensor
+
+    def forward_v0(self, seq_input):
         # input has dim [batch, seq, in_features], a transposition is needed
         seq_input = seq_input.transpose(0, 1)
         tfm_out = self.tfm(seq_input)[self.query_token]
@@ -142,10 +173,46 @@ class SceneTransformer(nn.Module):
 
         return probs
 
-    def get_value(self, seq_input):
-        # input has dim [seq, batch, in_features]
+    def forward(self, seq_input):
+        # modified version of the forward
+        # seq_input :: [B, seq, 63]
         seq_input = seq_input.transpose(0, 1)
+        # cores and factors have different encodings
+        cores = seq_input[0:1]
+        factors = seq_input[1:, ..., :self.factor_size]
+
+        cores = self.core_embedding(cores)
+        factors = self.factor_embedding(factors)
+
+        tfm_input = torch.cat([cores, factors], 0)
+        tfm_out = self.tfm(tfm_input)[self.query_token]
+        out = F.relu(self.mlp(tfm_out))
+        probs = F.softmax(self.policy_proj(out))
+
+        return probs
+
+    def get_value_v0(self, seq_input):
+        seq_input = seq_input.transpose(0, 1)
+        # input has dim [seq, batch, in_features]
         tfm_out = self.tfm(seq_input)[self.query_token]
+        out = F.relu(self.mlp(tfm_out))
+        value = self.value_proj(out)
+
+        return value
+
+    def get_value(self, seq_input):
+        # modified version of the get_value pass
+        # seq_input :: [B, seq, 63]
+        seq_input = seq_input.transpose(0, 1)
+        # cores and factors have different encodings
+        cores = seq_input[0:1]
+        factors = seq_input[1:, ..., :self.factor_size]
+
+        cores = self.core_embedding(cores)
+        factors = self.factor_embedding(factors)
+
+        tfm_input = torch.cat([cores, factors], 0)
+        tfm_out = self.tfm(tfm_input)[self.query_token]
         out = F.relu(self.mlp(tfm_out))
         value = self.value_proj(out)
 

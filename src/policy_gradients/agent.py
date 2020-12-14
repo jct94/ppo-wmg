@@ -131,7 +131,7 @@ class Trainer():
         # this version uses the observation encoders from the model
         tlist = []
         for obs_list in obss:
-            tlist.append(self.model.encode_observations(obs_list))
+            tlist.append(self.model.encode_observations_v2(obs_list))
 
         return torch.stack(tlist)
         # return self.model.encode_observations(t) # TODO check this works
