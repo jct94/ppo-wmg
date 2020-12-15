@@ -44,6 +44,9 @@ class Trainer():
         # Parameter Loading
         self.params = Parameters(params)
 
+        # check validity of observation type
+        assert self.params.OBSERVATIONS in ['flat', 'factored']
+
         # Whether or not the value network uses the current timestep
         time_in_state = self.VALUE_CALC == "time"
 
@@ -57,10 +60,11 @@ class Trainer():
             horizon_to_feed = self.T if time_in_state else None
             return Env(self.GAME, norm_states=self.NORM_STATES,
                        norm_rewards=self.NORM_REWARDS,
-                       params=self.params,
+                       params=self.params, # the observation type also propagates here
                        add_t_with_horizon=horizon_to_feed,
                        clip_obs=self.CLIP_OBSERVATIONS,
-                       clip_rew=self.CLIP_REWARDS)
+                       clip_rew=self.CLIP_REWARDS,
+                       observation_type=self.params.OBSERVATIONS)
 
         self.envs = [env_constructor() for _ in range(self.NUM_ACTORS)]
         self.params.AGENT_TYPE = "discrete" if self.envs[0].is_discrete else "continuous"
@@ -72,21 +76,26 @@ class Trainer():
         self.n_steps = 0
         self.log_every = log_every
 
-        # Model
-        self.model = SceneTransformer(
-            obs_features=64,
-            n_actions=self.params.NUM_ACTIONS,
-            core_size=self.envs[0].observation_space[0],
-            factor_size=self.envs[0].observation_space[1]
-        )
-        self.max_tokens = self.model.max_objects
-        self.opt = optim.Adam(self.model.parameters(), lr=self.PPO_LR_ADAM)
-
         # Instantiation
-        # self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
-        #                                      self.INITIALIZATION,
-        #                                      time_in_state=time_in_state, share_weights=self.params.SHARE_WEIGHTS)
-        #
+        if self.params.OBSERVATIONS == 'factored':
+
+            # Model
+            self.policy_model = SceneTransformer(
+                obs_features=64,
+                n_actions=self.params.NUM_ACTIONS,
+                core_size=self.envs[0].observation_space[0],
+                factor_size=self.envs[0].observation_space[1]
+            )
+            self.max_tokens = self.policy_model.max_objects
+
+        elif self.params.OBSERVATIONS == 'flat':
+
+            self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
+                                                 self.INITIALIZATION,
+                                                 time_in_state=time_in_state, share_weights=self.params.SHARE_WEIGHTS)
+
+        # TODO add option for learning rate annealing
+        self.opt = optim.Adam(self.policy_model.parameters(), lr=self.PPO_LR_ADAM)
         # opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
         # assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
         # # Whether we should use Adam or simple GD to optimize the policy parameters
@@ -134,7 +143,16 @@ class Trainer():
             tlist.append(self.model.encode_observations_v2(obs_list))
 
         return torch.stack(tlist)
-        # return self.model.encode_observations(t) # TODO check this works
+
+    def cpu_tensorize(self, obss):
+        # depends on the type of observations
+        if self.params.OBSERVATIONS == 'flat':
+            return cpu_tensorize(obss)
+        elif self.params.OBSERVATIONS == 'factored':
+            tlist = []
+            for obs_list in obss:
+                tlist.append(self.policy_model.encode_observations_v2(obs_list))
+            return torch.stack(tlist)
 
     def setup_stores(self, store):
         # Logging setup
@@ -210,7 +228,7 @@ class Trainer():
         (# actors, 1, ... state_shape)
         """
         if self.CPU:
-            return self.cpu_tensorize_v2([env.reset() for env in envs]).unsqueeze(1)
+            return self.cpu_tensorize([env.reset() for env in envs]).unsqueeze(1)
         else:
             raise ValueError("GPU not yet supported")
             return cu_tensorize([env.reset() for env in envs]).unsqueeze(1)
@@ -244,9 +262,10 @@ class Trainer():
 
         # tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
         # tensor_maker = self.cpu_tensorize_v2
+        # TODO: uniformize tensorization here
         data = [
             cpu_tensorize(normed_rewards),
-            self.cpu_tensorize_v2(states),
+            self.cpu_tensorize(states),
             cpu_tensorize(not_dones)
         ]
         # data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
@@ -290,25 +309,19 @@ class Trainer():
 
         assert self.NUM_ACTORS == 1
 
-        states[:, 0, :, :] = initial_states
-        last_states = states[:, 0, :, :]
+        states[:, 0] = initial_states
+        last_states = states[:, 0]
         for t in iterator:
             # assert shape_equal([self.NUM_ACTORS, self.NUM_FEATURES], last_states)
             # Retrieve probabilities 
             # action_pds: (# actors, # actions), prob dists over actions
             # next_actions: (# actors, 1), indices of actions
             # next_action_probs: (# actors, 1), prob of taken actions
-            action_pds = self.model(last_states)
-            next_actions = self.model.sample(action_pds)
-            next_action_log_probs = self.model.get_loglikelihood(action_pds, next_actions)
+            action_pds = self.policy_model(last_states)
+            next_actions = self.policy_model.sample(action_pds)
+            next_action_log_probs = self.policy_model.get_loglikelihood(action_pds, next_actions)
 
             next_action_log_probs = next_action_log_probs.unsqueeze(1)
-
-            # action_pds = self.policy_model(last_states)
-            # next_actions = self.policy_model.sample(action_pds)
-            # next_action_log_probs = self.policy_model.get_loglikelihood(action_pds, next_actions)
-
-            # next_action_log_probs = next_action_log_probs.unsqueeze(1)
             # shape_equal([self.NUM_ACTORS, 1], next_action_log_probs)
 
             # if discrete, next_actions is (# actors, 1) 
@@ -364,7 +377,7 @@ class Trainer():
             avg_episode_reward = -1
 
         # Last state is never acted on, discard
-        states = states[:, :-1, :, :]
+        states = states[:, :-1]
         trajs = Trajectories(rewards=rewards,
                              action_log_probs=action_log_probs, not_dones=not_dones,
                              actions=actions, states=states)
@@ -388,17 +401,12 @@ class Trainer():
             else:
                 avg_ep_length, avg_ep_reward, trajs, ep_rewards = output
 
-            # If we are sharing weights between the policy network and 
-            # value network, we use the get_value function of the 
-            # *policy* to # estimate the value, instead of using the value
-            # net
+            # If we are not sharing the weights between the policy and value nets,
+            # we still use the same interface, the weights are simply separate in
+            # the torch.nn Module.
             states = trajs.states.squeeze(0)
-            values = self.model.get_value(states).squeeze(-1)
+            values = self.policy_model.get_value(states).squeeze(-1)
             values = values.unsqueeze(0)
-            # if not self.SHARE_WEIGHTS:
-            #     values = self.val_model(trajs.states).squeeze(-1)
-            # else:
-            #     values = self.policy_model.get_value(trajs.states).squeeze(-1)
 
             # Calculate advantages and returns
             advantages, returns = self.advantage_and_return(trajs.rewards,
@@ -466,7 +474,7 @@ class Trainer():
         # Take optimizer steps
         args = [saps.states, saps.actions, saps.action_log_probs,
                 saps.rewards, saps.returns, saps.not_dones,
-                saps.advantages, self.model, self.params,
+                saps.advantages, self.policy_model, self.params,
                 store_to_pass, self.n_steps, self.opt]
 
         self.MAX_KL += self.MAX_KL_INCREMENT
@@ -520,16 +528,16 @@ class Trainer():
         print("Surrogate Loss:", surr_loss.item(),
               "| Value Loss:", val_loss.item())
         print("Time elapsed (s):", time.time() - start_time)
-        # if not self.policy_model.discrete:
-        #     mean_std = ch.exp(self.policy_model.log_stdev).mean()
-        #     print("Agent stdevs: %s" % mean_std)
-        #     self.store.log_table_and_tb('optimization', {
-        #         'mean_std': mean_std
-        #     })
-        # else:
-        self.store['optimization'].update_row({
-            'mean_std': np.nan
-        })
+        if not self.policy_model.discrete:
+            mean_std = ch.exp(self.policy_model.log_stdev).mean()
+            print("Agent stdevs: %s" % mean_std)
+            self.store.log_table_and_tb('optimization', {
+                'mean_std': mean_std
+            })
+        else:
+            self.store['optimization'].update_row({
+                'mean_std': np.nan
+            })
 
         self.store['optimization'].flush_row()
         # End logging code

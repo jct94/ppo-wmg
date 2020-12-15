@@ -85,6 +85,8 @@ class SceneTransformer(nn.Module):
 
         super().__init__()
 
+        self.discrete = True
+
         self.query_token = 0
         self.max_objects = 9
         self.core_size = core_size
