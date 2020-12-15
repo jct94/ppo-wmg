@@ -15,7 +15,7 @@ SUCCESS_RATE_THRESHOLD = 0.99
 HELDOUT_TESTING = True
 NUM_TEST_EPISODES = 1000
 BINARY_REWARD = True
-OBS_ENCODER = "Flat"
+OBS_ENCODER = "Factored"
 USE_INSTRUCTION = True
 
 color_list = ['red', 'green', 'blue', 'purple', 'yellow', 'grey']
@@ -286,7 +286,7 @@ class ClauseEncoder(object):
 
 class Env(object):
     def __init__(self, game, norm_states, norm_rewards, params, add_t_with_horizon=None, clip_obs=None, clip_rew=None,
-                 seed=None):
+                 seed=None, observation_type='factored'):
         if not seed:
             seed = 25912
 
@@ -307,18 +307,19 @@ class Env(object):
         self.num_door_states = 3
         self.action_space = 7
         self.max_num_factors = 12
+        self.observation_type = observation_type
 
-        if OBS_ENCODER == 'Flat':
+        if self.observation_type == 'flat':
             self.observation_space = self.action_space + self.num_orientations  # Last action, and current direction.
             self.observation_space += self.retina_width * self.retina_width * (
                     self.num_cell_types + self.num_colors + self.num_door_states)  # Image.
             if USE_INSTRUCTION:
                 self.observation_space += self.encoder.double_object_vector_length
-        elif OBS_ENCODER == 'CnnFlat':
-            self.observation_space = self.action_space + self.num_orientations  # Last action, and current direction.
-            if USE_INSTRUCTION:
-                self.observation_space += self.encoder.double_object_vector_length
-        elif OBS_ENCODER == 'Factored':
+        # elif self.observation_type == 'CnnFlat':
+        #     self.observation_space = self.action_space + self.num_orientations  # Last action, and current direction.
+        #     if USE_INSTRUCTION:
+        #         self.observation_space += self.encoder.double_object_vector_length
+        elif self.observation_type == 'factored':
             self.observation_global_vector_size = self.action_space + self.num_orientations + 2 * (
                     1 + self.retina_width)
             if USE_INSTRUCTION:
@@ -326,14 +327,14 @@ class Env(object):
             self.observation_factor_vector_size = self.num_object_types + self.num_colors + 2 * (1 + self.retina_width)
             self.observation_factor_vector_size += self.num_door_states
             self.observation_space = (self.observation_global_vector_size, self.observation_factor_vector_size)
-        elif OBS_ENCODER == 'FactoredThenFlattened':
-            self.observation_global_vector_size = self.action_space + self.num_orientations + 2 * (
-                    1 + self.retina_width)
-            if USE_INSTRUCTION:
-                self.observation_global_vector_size += self.encoder.double_object_vector_length
-            self.observation_factor_vector_size = self.num_object_types + self.num_colors + 2 * (1 + self.retina_width)
-            self.observation_factor_vector_size += self.num_door_states
-            self.observation_space = self.observation_global_vector_size + self.max_num_factors * self.observation_factor_vector_size
+        # elif self.observation_type == 'FactoredThenFlattened':
+        #     self.observation_global_vector_size = self.action_space + self.num_orientations + 2 * (
+        #             1 + self.retina_width)
+        #     if USE_INSTRUCTION:
+        #         self.observation_global_vector_size += self.encoder.double_object_vector_length
+        #     self.observation_factor_vector_size = self.num_object_types + self.num_colors + 2 * (1 + self.retina_width)
+        #     self.observation_factor_vector_size += self.num_door_states
+        #     self.observation_space = self.observation_global_vector_size + self.max_num_factors * self.observation_factor_vector_size
 
         self.reset_online_test_sums()
         self.reward = 0.
@@ -371,9 +372,12 @@ class Env(object):
             if len(action_shape) == 0 else action_shape[0]
 
         # Number of features
-        #TODO Fix it later to make it work with factored
+        # TODO Fix it later to make it work with factored
         # assert len(self.observation_space) == 1
-        self.num_features = self.observation_space
+        if isinstance(self.observation_space, tuple):
+            self.num_features = self.observation_space[1] # we take the factor dimensiom
+        else:
+            self.num_features = self.observation_space
 
         # Support for state normalization or using time as a feature
         self.state_filter = Identity()
@@ -396,14 +400,14 @@ class Env(object):
 
 
     def assemble_current_observation(self, obs, last_action=None):
-        if OBS_ENCODER == 'Flat':
+        if self.observation_type == 'flat':
             return self.encode_flat(obs, last_action)
-        if OBS_ENCODER == 'CnnFlat':
-            return self.encode_cnn_flat(obs, last_action)
-        elif OBS_ENCODER == 'Factored':
+        # if self.observation_type == 'CnnFlat':
+        #     return self.encode_cnn_flat(obs, last_action)
+        elif self.observation_type == 'factored':
             return self.encode_factored(obs, last_action)
-        elif OBS_ENCODER == 'FactoredThenFlattened':
-            return self.flatten(self.encode_factored(obs, last_action))
+        # elif self.observation_type == 'FactoredThenFlattened':
+        #     return self.flatten(self.encode_factored(obs, last_action))
 
     def flatten(self, obs_list):
         self.observation = np.zeros(self.observation_space)

@@ -230,7 +230,7 @@ def value_step(all_states, returns, advantages, not_dones, net,
     return val_loss
 
 def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones, 
-                advs, net, params, store, opt_step):
+                advs, net, params, store, opt_step, opt):
     '''
     Proximal Policy Optimization
     Runs K epochs of PPO as in https://arxiv.org/abs/1707.06347
@@ -292,22 +292,28 @@ def ppo_step(all_states, actions, old_log_ps, rewards, returns, not_dones,
                                       store, old_vs=batch_old_vs, opt_step=opt_step)
                 loss += params.VALUE_MULTIPLIER * val_loss
 
-            # Optimizer step (Adam or SGD)
-            if params.POLICY_ADAM is None:
-                grad = ch.autograd.grad(loss, net.parameters())
-                flat_grad = flatten(grad)
-                if params.CLIP_GRAD_NORM != -1:
-                    norm_grad = ch.norm(flat_grad)
-                    flat_grad = flat_grad if norm_grad <= params.CLIP_GRAD_NORM else \
-                                flat_grad / norm_grad * params.CLIP_GRAD_NORM
+            opt.zero_grad()
+            loss.backward()
+            if params.CLIP_GRAD_NORM != -1:
+                ch.nn.utils.clip_grad_norm(net.parameters(), params.CLIP_GRAD_NORM)
+            opt.step()
 
-                assign(flatten(net.parameters()) - params.PPO_LR * flat_grad, net.parameters())
-            else:
-                params.POLICY_ADAM.zero_grad()
-                loss.backward()
-                if params.CLIP_GRAD_NORM != -1:
-                    ch.nn.utils.clip_grad_norm(net.parameters(), params.CLIP_GRAD_NORM)
-                params.POLICY_ADAM.step()
+            # # Optimizer step (Adam or SGD)
+            # if params.POLICY_ADAM is None:
+            #     grad = ch.autograd.grad(loss, net.parameters())
+            #     flat_grad = flatten(grad)
+            #     if params.CLIP_GRAD_NORM != -1:
+            #         norm_grad = ch.norm(flat_grad)
+            #         flat_grad = flat_grad if norm_grad <= params.CLIP_GRAD_NORM else \
+            #                     flat_grad / norm_grad * params.CLIP_GRAD_NORM
+            #
+            #     assign(flatten(net.parameters()) - params.PPO_LR * flat_grad, net.parameters())
+            # else:
+            #     params.POLICY_ADAM.zero_grad()
+            #     loss.backward()
+            #     if params.CLIP_GRAD_NORM != -1:
+            #         ch.nn.utils.clip_grad_norm(net.parameters(), params.CLIP_GRAD_NORM)
+            #     params.POLICY_ADAM.step()
 
     if params.SHARE_WEIGHTS:
         return loss, loss-val_loss, val_loss

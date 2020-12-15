@@ -8,6 +8,7 @@ import numpy as np
 from copy import deepcopy
 import gym
 from .models import *
+from .transformer_models import *
 from .torch_utils import *
 from .steps import value_step, step_with_mode
 from .logging import *
@@ -43,6 +44,9 @@ class Trainer():
         # Parameter Loading
         self.params = Parameters(params)
 
+        # check validity of observation type
+        assert self.params.OBSERVATIONS in ['flat', 'factored']
+
         # Whether or not the value network uses the current timestep
         time_in_state = self.VALUE_CALC == "time"
 
@@ -56,10 +60,11 @@ class Trainer():
             horizon_to_feed = self.T if time_in_state else None
             return Env(self.GAME, norm_states=self.NORM_STATES,
                        norm_rewards=self.NORM_REWARDS,
-                       params=self.params,
+                       params=self.params, # the observation type also propagates here
                        add_t_with_horizon=horizon_to_feed,
                        clip_obs=self.CLIP_OBSERVATIONS,
-                       clip_rew=self.CLIP_REWARDS)
+                       clip_rew=self.CLIP_REWARDS,
+                       observation_type=self.params.OBSERVATIONS)
 
         self.envs = [env_constructor() for _ in range(self.NUM_ACTORS)]
         self.params.AGENT_TYPE = "discrete" if self.envs[0].is_discrete else "continuous"
@@ -72,49 +77,82 @@ class Trainer():
         self.log_every = log_every
 
         # Instantiation
-        self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
-                                             self.INITIALIZATION,
-                                             time_in_state=time_in_state, share_weights=self.params.SHARE_WEIGHTS)
+        if self.params.OBSERVATIONS == 'factored':
 
-        opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
-        assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
-        # Whether we should use Adam or simple GD to optimize the policy parameters
-        if self.PPO_LR_ADAM != -1:
-            kwargs = {
-                'lr': self.PPO_LR_ADAM,
-            }
+            # Model
+            self.policy_model = SceneTransformer(
+                obs_features=64,
+                n_actions=self.params.NUM_ACTIONS,
+                core_size=self.envs[0].observation_space[0],
+                factor_size=self.envs[0].observation_space[1]
+            )
+            self.max_tokens = self.policy_model.max_objects
 
-            if self.params.ADAM_EPS > 0:
-                kwargs['eps'] = self.ADAM_EPS
+        elif self.params.OBSERVATIONS == 'flat':
 
-            self.params.POLICY_ADAM = optim.Adam(self.policy_model.parameters(),
-                                                 **kwargs)
-        else:
-            self.params.POLICY_ADAM = optim.SGD(self.policy_model.parameters(), lr=self.PPO_LR)
+            self.policy_model = policy_net_class(self.NUM_FEATURES, self.NUM_ACTIONS,
+                                                 self.INITIALIZATION,
+                                                 time_in_state=time_in_state, share_weights=self.params.SHARE_WEIGHTS)
 
-        # If using a time dependent value function, add one extra feature
-        # for the time ratio t/T
-        if time_in_state:
-            self.params.NUM_FEATURES = self.NUM_FEATURES + 1
-
-        # Value function optimization
-        self.val_model = value_net_class(self.NUM_FEATURES, self.INITIALIZATION)
-        self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5)
-        assert self.policy_model.discrete == (self.AGENT_TYPE == "discrete")
-
-        # Learning rate annealing
-        # From OpenAI hyperparametrs:
-        # Set adam learning rate to 3e-4 * alpha, where alpha decays from 1 to 0 over training
-        if self.ANNEAL_LR:
-            lam = lambda f: 1 - f / self.TRAIN_STEPS
-            ps = optim.lr_scheduler.LambdaLR(self.POLICY_ADAM,
-                                             lr_lambda=lam)
-            vs = optim.lr_scheduler.LambdaLR(self.val_opt, lr_lambda=lam)
-            self.params.POLICY_SCHEDULER = ps
-            self.params.VALUE_SCHEDULER = vs
+        # TODO add option for learning rate annealing
+        self.opt = optim.Adam(self.policy_model.parameters(), lr=self.PPO_LR_ADAM)
+        # opts_ok = (self.PPO_LR == -1 or self.PPO_LR_ADAM == -1)
+        # assert opts_ok, "One of ppo_lr and ppo_lr_adam must be -1 (off)."
+        # # Whether we should use Adam or simple GD to optimize the policy parameters
+        # if self.PPO_LR_ADAM != -1:
+        #     kwargs = {
+        #         'lr': self.PPO_LR_ADAM,
+        #     }
+        #
+        #     if self.params.ADAM_EPS > 0:
+        #         kwargs['eps'] = self.ADAM_EPS
+        #
+        #     self.params.POLICY_ADAM = optim.Adam(self.policy_model.parameters(),
+        #                                          **kwargs)
+        # else:
+        #     self.params.POLICY_ADAM = optim.SGD(self.policy_model.parameters(), lr=self.PPO_LR)
+        #
+        # # If using a time dependent value function, add one extra feature
+        # # for the time ratio t/T
+        # if time_in_state:
+        #     self.params.NUM_FEATURES = self.NUM_FEATURES + 1
+        #
+        # # Value function optimization
+        # self.val_model = value_net_class(self.NUM_FEATURES, self.INITIALIZATION)
+        # self.val_opt = optim.Adam(self.val_model.parameters(), lr=self.VAL_LR, eps=1e-5)
+        # assert self.policy_model.discrete == (self.AGENT_TYPE == "discrete")
+        #
+        # # Learning rate annealing
+        # # From OpenAI hyperparametrs:
+        # # Set adam learning rate to 3e-4 * alpha, where alpha decays from 1 to 0 over training
+        # if self.ANNEAL_LR:
+        #     lam = lambda f: 1 - f / self.TRAIN_STEPS
+        #     ps = optim.lr_scheduler.LambdaLR(self.POLICY_ADAM,
+        #                                      lr_lambda=lam)
+        #     vs = optim.lr_scheduler.LambdaLR(self.val_opt, lr_lambda=lam)
+        #     self.params.POLICY_SCHEDULER = ps
+        #     self.params.VALUE_SCHEDULER = vs
 
         if store is not None:
             self.setup_stores(store)
+
+    def cpu_tensorize_v2(self, obss):
+        # this version uses the observation encoders from the model
+        tlist = []
+        for obs_list in obss:
+            tlist.append(self.model.encode_observations_v2(obs_list))
+
+        return torch.stack(tlist)
+
+    def cpu_tensorize(self, obss):
+        # depends on the type of observations
+        if self.params.OBSERVATIONS == 'flat':
+            return cpu_tensorize(obss)
+        elif self.params.OBSERVATIONS == 'factored':
+            tlist = []
+            for obs_list in obss:
+                tlist.append(self.policy_model.encode_observations_v2(obs_list))
+            return torch.stack(tlist)
 
     def setup_stores(self, store):
         # Logging setup
@@ -185,13 +223,14 @@ class Trainer():
         return advantages.clone().detach(), returns.clone().detach()
 
     def reset_envs(self, envs):
-        '''
+        """
         Resets environments and returns initial state with shape:
         (# actors, 1, ... state_shape)
-	    '''
+        """
         if self.CPU:
-            return cpu_tensorize([env.reset() for env in envs]).unsqueeze(1)
+            return self.cpu_tensorize([env.reset() for env in envs]).unsqueeze(1)
         else:
+            raise ValueError("GPU not yet supported")
             return cu_tensorize([env.reset() for env in envs]).unsqueeze(1)
 
     def multi_actor_step(self, actions, envs):
@@ -219,10 +258,17 @@ class Trainer():
             # Aggregate
             normed_rewards.append([normed_reward])
             not_dones.append([int(not is_done)])
-            states.append([new_state])
+            states.append(new_state)
 
-        tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
-        data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
+        # tensor_maker = cpu_tensorize if self.CPU else cu_tensorize
+        # tensor_maker = self.cpu_tensorize_v2
+        # TODO: uniformize tensorization here
+        data = [
+            cpu_tensorize(normed_rewards),
+            self.cpu_tensorize(states),
+            cpu_tensorize(not_dones)
+        ]
+        # data = list(map(tensor_maker, [normed_rewards, states, not_dones]))
         return [completed_episode_info, *data]
 
     def run_trajectories(self, num_saps, return_rewards=False, should_tqdm=False):
@@ -263,8 +309,8 @@ class Trainer():
 
         assert self.NUM_ACTORS == 1
 
-        states[:, 0, :] = initial_states
-        last_states = states[:, 0, :]
+        states[:, 0] = initial_states
+        last_states = states[:, 0]
         for t in iterator:
             # assert shape_equal([self.NUM_ACTORS, self.NUM_FEATURES], last_states)
             # Retrieve probabilities 
@@ -310,7 +356,10 @@ class Trainer():
                 (states, next_states)
             ]
 
-            last_states = next_states[:, 0, :]
+            # last_states = next_states[:, 0, :]
+            last_states = next_states # TODO: this is a quick fix, but in the original code the states
+                                      # have an additional dimension
+
             for total, v in pairs:
                 if total is states:
                     total[:, t + 1] = v
@@ -328,7 +377,7 @@ class Trainer():
             avg_episode_reward = -1
 
         # Last state is never acted on, discard
-        states = states[:, :-1, :]
+        states = states[:, :-1]
         trajs = Trajectories(rewards=rewards,
                              action_log_probs=action_log_probs, not_dones=not_dones,
                              actions=actions, states=states)
@@ -352,14 +401,12 @@ class Trainer():
             else:
                 avg_ep_length, avg_ep_reward, trajs, ep_rewards = output
 
-            # If we are sharing weights between the policy network and 
-            # value network, we use the get_value function of the 
-            # *policy* to # estimate the value, instead of using the value
-            # net
-            if not self.SHARE_WEIGHTS:
-                values = self.val_model(trajs.states).squeeze(-1)
-            else:
-                values = self.policy_model.get_value(trajs.states).squeeze(-1)
+            # If we are not sharing the weights between the policy and value nets,
+            # we still use the same interface, the weights are simply separate in
+            # the torch.nn Module.
+            states = trajs.states.squeeze(0)
+            values = self.policy_model.get_value(states).squeeze(-1)
+            values = values.unsqueeze(0)
 
             # Calculate advantages and returns
             advantages, returns = self.advantage_and_return(trajs.rewards,
@@ -428,7 +475,7 @@ class Trainer():
         args = [saps.states, saps.actions, saps.action_log_probs,
                 saps.rewards, saps.returns, saps.not_dones,
                 saps.advantages, self.policy_model, self.params,
-                store_to_pass, self.n_steps]
+                store_to_pass, self.n_steps, self.opt]
 
         self.MAX_KL += self.MAX_KL_INCREMENT
 
@@ -442,9 +489,9 @@ class Trainer():
 
         # If the anneal_lr option is set, then we decrease the 
         # learning rate at each training step
-        if self.ANNEAL_LR:
-            self.POLICY_SCHEDULER.step()
-            self.VALUE_SCHEDULER.step()
+        # if self.ANNEAL_LR:
+        #     self.POLICY_SCHEDULER.step()
+        #     self.VALUE_SCHEDULER.step()
 
         if should_adv_log:
             log_value_losses(self, val_saps, 'heldout')
