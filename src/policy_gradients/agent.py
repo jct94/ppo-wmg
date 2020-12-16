@@ -136,13 +136,6 @@ class Trainer():
         if store is not None:
             self.setup_stores(store)
 
-    def cpu_tensorize_v2(self, obss):
-        # this version uses the observation encoders from the model
-        tlist = []
-        for obs_list in obss:
-            tlist.append(self.model.encode_observations_v2(obs_list))
-
-        return torch.stack(tlist)
 
     def cpu_tensorize(self, obss):
         # depends on the type of observations
@@ -151,7 +144,7 @@ class Trainer():
         elif self.params.OBSERVATIONS == 'factored':
             tlist = []
             for obs_list in obss:
-                tlist.append(self.policy_model.encode_observations_v2(obs_list))
+                tlist.append(self.policy_model.encode_observations(obs_list))
             return torch.stack(tlist)
 
     def setup_stores(self, store):

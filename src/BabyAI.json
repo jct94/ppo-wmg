@@ -41,5 +41,5 @@
     "save_iters": 0,
     "out_dir": "test",
     "clip_grad_norm": -1,
-    "observations": "flat"
+    "observations": "factored"
 }
